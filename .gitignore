@@ -8,3 +8,6 @@ data/raw/
 runs/
 *.pyc
 .DS_Store
+uv.lock
+.vscode
+.env

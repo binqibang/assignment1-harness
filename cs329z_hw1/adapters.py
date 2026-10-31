@@ -27,7 +27,13 @@ of this call.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+import heapq
+import math
+from typing import Any, Callable, Counter, Optional
+
+from .pipelines import priority, digest
+
+from .tokenizer import tokenize
 
 from cs329z_hw1.types import (
     AgentConfig,
@@ -61,7 +67,7 @@ def run_priority(email: Email, lm: LMCallable) -> dict:
     * The function does not raise and does not modify ``email``.
     * Live: at least 85% agreement with tests/fixtures/priority_gold.json.
     """
-    raise NotImplementedError
+    return priority.run(email, lm)
 
 
 def run_daily_digest(emails: list[Email], lm: LMCallable) -> str:
@@ -79,7 +85,12 @@ def run_daily_digest(emails: list[Email], lm: LMCallable) -> str:
       site that email is about; it contains no term listed for the gold
       ignore emails.
     """
-    raise NotImplementedError
+    email_priority = {}
+    for email in emails:
+        priority = run_priority(email, lm)
+        email_priority[email['id']] = priority
+
+    return digest.run(emails, email_priority, lm)
 
 
 def run_bm25_build(docs: list[str]) -> Any:
@@ -92,8 +103,47 @@ def run_bm25_build(docs: list[str]) -> Any:
     back to ``run_bm25_search``. The index over the archive must build in
     under 15 seconds.
     """
-    raise NotImplementedError
+    N = len(docs)
 
+    if N == 0:
+        return {}
+
+    doc_freqs = []    # list of doc term frequency
+    doc_lens = []     # number of doc term
+    tf = Counter()    # global term frequency
+    invert_idx = {}   # <term-[doc_ids]>
+
+    for i, doc in enumerate(docs):
+        tokens = tokenize(doc)
+        df = Counter(tokens)
+        doc_freqs.append(df)
+        doc_lens.append(len(tokens))
+        # update unique term frequency, number of doc where term occurs
+        for term in df:
+            tf[term] += 1
+            if term not in invert_idx:
+                invert_idx[term] = [i]
+            else:
+                invert_idx[term].append(i)
+
+    avg_doc_len = sum(doc_lens) / N
+
+    idf = {}
+    # idf(t) = ln(N - n(t) + 0.5 / (n(t) + 0.5) + 1)
+    for term, n in tf.items():
+        idf[term] = math.log((N - n + 0.5) / (n + 0.5) + 1)
+
+    index = {
+        "N": N,
+        "avg_doc_len": avg_doc_len,
+        "doc_freqs": doc_freqs,
+        "doc_lens": doc_lens,
+        "tf": tf,
+        "idf": idf,
+        "invert_idx": invert_idx
+    }
+    return index
+            
 
 def run_bm25_search(index: Any, query: str, k: int) -> list[tuple[int, float]]:
     """Problem (bm25).
@@ -113,7 +163,43 @@ def run_bm25_search(index: Any, query: str, k: int) -> list[tuple[int, float]]:
       query on average over the archive, and 2 ms for a term that occurs in
       3 of 200,000 documents.
     """
-    raise NotImplementedError
+    query_tokens = tokenize(query)
+    if "N" not in index or k <= 0 or len(query_tokens) == 0:
+        return []
+
+    # BM25 params
+    k1 = 1.5
+    b = 0.75
+
+    # index
+    avgdl = index['avg_doc_len']
+    docl = index['doc_lens']
+    invert_idx = index['invert_idx']
+    doc_freqs = index['doc_freqs']
+    idf = index["idf"]
+
+    scores = {}
+    for t in set(query_tokens):
+        if t not in invert_idx:
+            continue
+        for doc_id in invert_idx[t]:
+            df = doc_freqs[doc_id]
+            numerator = df[t] * (k1 + 1)
+            denominator = df[t] + k1 * (1 - b + b * docl[doc_id] / avgdl)
+            score = idf[t] * numerator / denominator
+
+            if doc_id in scores:
+                scores[doc_id] += score
+            else:
+                scores[doc_id] = score
+
+    if not scores:
+        return []
+
+    # sorted by score desc first, id asc second
+    top_k_docs = heapq.nlargest(k, scores.keys(), key=lambda d: (scores[d], -d))
+
+    return [(doc_id, scores[doc_id]) for doc_id in top_k_docs]
 
 
 def run_email_qa(
