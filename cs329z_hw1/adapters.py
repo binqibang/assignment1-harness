@@ -28,13 +28,14 @@ of this call.
 from __future__ import annotations
 
 import heapq
+import json
 import math
 from typing import Any, Callable, Counter, Optional
 
-from .pipelines import priority, digest
-
-from .tokenizer import tokenize
-
+from cs329z_hw1.agent.prompts import CALL_TOOL_PROMPT
+from cs329z_hw1.agent.tool import ToolRegister, parse
+from cs329z_hw1.pipelines import priority, digest, qa
+from cs329z_hw1.tokenizer import tokenize
 from cs329z_hw1.types import (
     AgentConfig,
     DocWindow,
@@ -178,6 +179,7 @@ def run_bm25_search(index: Any, query: str, k: int) -> list[tuple[int, float]]:
     doc_freqs = index['doc_freqs']
     idf = index["idf"]
 
+    # TODO use numpy matrix to accelerate
     scores = {}
     for t in set(query_tokens):
         if t not in invert_idx:
@@ -225,7 +227,7 @@ def run_email_qa(
       contain an accepted answer, and the ``support`` of every correct
       answer includes at least one gold email.
     """
-    raise NotImplementedError
+    return qa.run(question, search, lm)
 
 
 # ======================================================================
@@ -257,7 +259,7 @@ def run_tool_registry(tools: list[ToolSpec]) -> Any:
       ``fn(**args)``: status "ok", ``content == str(return value)``.
     * The registry keeps working after any of these outcomes.
     """
-    raise NotImplementedError
+    return ToolRegister(tools)
 
 
 def run_render_tools(schemas: list[dict]) -> str:
@@ -269,7 +271,22 @@ def run_render_tools(schemas: list[dict]) -> str:
     this text, the model must write a correct call for at least 18 of the 20
     requests in tests/fixtures/agent_protocol_requests.json.
     """
-    raise NotImplementedError
+    lines = [
+        "You have access to the following tools:\n",
+    ]
+    
+    for schema in schemas:
+        name = schema["name"]
+        desc = schema["description"]
+        params = schema.get("parameters", {})
+        
+        
+        lines.append(f"- {name}: {desc}")
+        lines.append(f"  Parameters: {params}")
+        lines.append("")
+        
+    
+    return "\n".join(lines) + CALL_TOOL_PROMPT
 
 
 def run_parse_response(text: str) -> ParsedResponse:
@@ -289,7 +306,11 @@ def run_parse_response(text: str) -> ParsedResponse:
       is exactly the original call, never a different one. If the cut is
       inside the arguments, ``tool_call`` is None and ``error`` is set.
     """
-    raise NotImplementedError
+    try:
+        return parse(text)
+    except Exception as e:
+        return ParsedResponse(text=text.strip(), tool_call=None,
+                              error=str(e) or "parse error")
 
 
 def run_format_tool_call(text: str, call: ToolCall) -> str:
@@ -308,7 +329,14 @@ def run_format_tool_call(text: str, call: ToolCall) -> str:
       complete call in your own format.
     * ``call`` is not modified.
     """
-    raise NotImplementedError
+    # Serialize the call to JSON (preserves types: 1 vs 1.0 vs true vs "1")
+    call_dict = {"name": call.name, "arguments": call.args}
+    call_json = json.dumps(call_dict, ensure_ascii=False)
+    
+    length = len(call_json)
+    
+    # Format: text + length-prefixed tool call
+    return f"{text}\n<tool_call:{length}>{call_json}</tool_call>"
 
 
 def run_agent_session(
